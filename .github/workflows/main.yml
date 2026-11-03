@@ -1,0 +1,50 @@
+name: Run Telegram Bot
+
+on:
+  workflow_dispatch:        # Actions tab se manually "Run workflow" dabao
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true  # naya run aaye to purana band
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350    # GitHub ka limit 6 ghante hai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
+
+      # Optional: agar JAZZ_COOKIES secret set hai to login dobara nahi karna padega
+      - name: Restore Jazz cookies (optional)
+        env:
+          JAZZ_COOKIES: ${{ secrets.JAZZ_COOKIES }}
+        run: |
+          if [ -n "$JAZZ_COOKIES" ]; then
+            echo "$JAZZ_COOKIES" > jazz_cookies.json
+            echo "Cookies restored"
+          else
+            echo "No JAZZ_COOKIES secret - bot me /login use karna padega"
+          fi
+
+      - name: Start bot
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python bot.py

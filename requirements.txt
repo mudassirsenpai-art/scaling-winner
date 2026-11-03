@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+playwright
+requests
+requests-toolbelt
+nest-asyncio

@@ -39,10 +39,43 @@ jobs:
             echo "No DATABASE_JSON secret - fresh start"
           fi
 
-      - name: Start bot
+      - name: Start bot (with logging)
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           PORT: "8080"
-        run: python bot.py
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          # live logs Actions page pe bhi dikhenge, aur bot.log me bhi save honge
+          python -X faulthandler -u bot.py 2>&1 | tee bot.log
+
+      # Neeche ke steps bot band hone, crash, cancel ya timeout, har case me chalte hain
+      - name: Error summary
+        if: always()
+        run: |
+          {
+            echo "## Bot log summary"
+            echo "Total lines: $(wc -l < bot.log 2>/dev/null || echo 0)"
+            echo
+            echo "### Errors / warnings (last 60)"
+            echo '```'
+            grep -n -i -E "error|exception|traceback|critical|failed|❌|💔|⚠️" bot.log 2>/dev/null | tail -60 || true
+            echo '```'
+            echo
+            echo "### Last 40 lines"
+            echo '```'
+            tail -40 bot.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload log file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-log-${{ github.run_number }}
+          path: |
+            bot.log
+          if-no-files-found: ignore
+          retention-days: 7

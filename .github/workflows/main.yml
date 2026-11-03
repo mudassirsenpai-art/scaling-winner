@@ -1,4 +1,4 @@
-name: Run Telegram Bot
+name: Run Jazz Telegram Bot
 
 on:
   workflow_dispatch:        # Actions tab se manually "Run workflow" dabao
@@ -27,19 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: playwright install --with-deps chromium
-
-      # Optional: agar JAZZ_COOKIES secret set hai to login dobara nahi karna padega
-      - name: Restore Jazz cookies (optional)
+      # Optional: database.json (sessions/allowed users) pehle se save rakhna ho to
+      - name: Restore database (optional)
         env:
-          JAZZ_COOKIES: ${{ secrets.JAZZ_COOKIES }}
+          DATABASE_JSON: ${{ secrets.DATABASE_JSON }}
         run: |
-          if [ -n "$JAZZ_COOKIES" ]; then
-            echo "$JAZZ_COOKIES" > jazz_cookies.json
-            echo "Cookies restored"
+          if [ -n "$DATABASE_JSON" ]; then
+            echo "$DATABASE_JSON" > database.json
+            echo "database.json restored"
           else
-            echo "No JAZZ_COOKIES secret - bot me /login use karna padega"
+            echo "No DATABASE_JSON secret - fresh start"
           fi
 
       - name: Start bot
@@ -47,4 +44,5 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PORT: "8080"
         run: python bot.py

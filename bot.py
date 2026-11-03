@@ -542,75 +542,127 @@ async def extract_link_cmd(client, message):
         await msg.edit(f"⚠️ Error during extraction: {str(e)}")
 
 # --- API LOGIN COMMANDS ---
+# ─────────────────────────────────────────────────────────────────
+# JAZZ LOGIN HELPERS (naya JSON API flow: /api/v1/auth/login/number + /verify)
+# ─────────────────────────────────────────────────────────────────
+TICKET_RE = re.compile(r'eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]{8,})?')
+
+def _is_login_ticket(tok):
+    """Ticket ka pehla part base64 JSON hota hai jisme p == 'login'."""
+    import base64
+    try:
+        part = tok.split('.')[0]
+        raw = base64.urlsafe_b64decode(part + '=' * (-len(part) % 4))
+        return json.loads(raw).get('p') == 'login'
+    except Exception:
+        return False
+
+def _extract_ticket(resp):
+    """Redirect URLs, final URL aur page body me se login ticket dhoondo."""
+    texts = [urllib.parse.unquote(resp.url)]
+    for h in resp.history:
+        texts.append(urllib.parse.unquote(h.headers.get('Location', '') or ''))
+        texts.append(urllib.parse.unquote(h.url))
+    texts.append(resp.text or '')
+    found = []
+    for t in texts:
+        found.extend(TICKET_RE.findall(t))
+    for tok in found:
+        if _is_login_ticket(tok):
+            return tok
+    return found[0] if found else None
+
+def _find_key(obj, names):
+    """JSON me kisi bhi depth pe key dhoondo (case/underscore ignore)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower().replace('_', '') in names and isinstance(v, (str, int)) and v:
+                return str(v)
+        for v in obj.values():
+            r = _find_key(v, names)
+            if r: return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_key(v, names)
+            if r: return r
+    return None
+
+def _safe_json(resp):
+    try:
+        d = resp.json()
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+# --- API LOGIN COMMANDS ---
 async def do_api_login(client, message, number, user_id):
     msg = await message.reply("⚙️ *Initializing secure session...*")
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Connection': 'keep-alive'})
+    ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    session.headers.update({'User-Agent': ua, 'Accept': '*/*', 'Connection': 'keep-alive'})
     loop = asyncio.get_event_loop()
-    
+
+    random_state = random.randint(10000, 99999)
+    auth_url = f"https://jazzdrive.com.pk/oauth2/authorization.php?response_type=code&client_id=web&state={random_state}&redirect_uri=https://cloud.jazzdrive.com.pk/ui/html/oauth.html"
+    api_base = "https://jazzdrive.com.pk/api/v1/auth/login"
+    api_headers = {
+        'Origin': 'https://jazzdrive.com.pk',
+        'Referer': 'https://jazzdrive.com.pk/web/login',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+    }
+
     max_retries = 3
-    verify_url = ""
-    res2 = None
+    ticket = None
+    login_page_url = "https://jazzdrive.com.pk/web/login"
+    number_ok = False
+    last_error = ""
 
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 await msg.edit(f"🔄 *Server syncing, retrying... ({attempt+1}/{max_retries})*")
                 await asyncio.sleep(2)
-            
+
             await loop.run_in_executor(None, lambda: session.get("https://jazzdrive.com.pk/", timeout=15))
             if attempt == 0:
                 await msg.edit("🌐 *Connecting to JazzDrive...*")
-                
-            random_state = random.randint(10000, 99999)
-            auth_url = f"https://jazzdrive.com.pk/oauth2/authorization.php?response_type=code&client_id=web&state={random_state}&redirect_uri=https://cloud.jazzdrive.com.pk/ui/html/oauth.html"
+
             res1 = await loop.run_in_executor(None, lambda: session.get(auth_url, timeout=15, allow_redirects=True))
-            signup_url = res1.url 
-            print(f"[LOGIN] attempt={attempt+1} step=auth status={res1.status_code} final_url={res1.url}", flush=True)
-            
-            if "signup.php" not in signup_url:
-                print(f"[LOGIN] ❌ signup.php page nahi mila. Body snippet: {res1.text[:300]!r}", flush=True)
+            login_page_url = res1.url
+            print(f"[LOGIN] attempt={attempt+1} step=auth status={res1.status_code} final_url={res1.url[:200]}", flush=True)
+
+            ticket = _extract_ticket(res1)
+            if not ticket:
+                last_error = f"ticket nahi mila (url: {res1.url[:120]})"
+                print(f"[LOGIN] ❌ ticket nahi mila. Body snippet: {res1.text[:400]!r}", flush=True)
                 continue
-            
+            print(f"[LOGIN] ✅ ticket mil gaya (len={len(ticket)})", flush=True)
+
             if attempt == 0:
                 await msg.edit("📲 *Submitting your number...*")
-            
-            post_url = signup_url
-            form_action_match = re.search(r'<form[^>]+action\s*=\s*["\']([^"\']+)["\']', res1.text, re.IGNORECASE)
-            if form_action_match:
-                post_url = urljoin(signup_url, form_action_match.group(1).replace('&amp;', '&'))
 
-            payload = {}
-            for match in re.finditer(r'<input([^>]+)>', res1.text, re.IGNORECASE):
-                attr_str = match.group(1)
-                name_m = re.search(r'name\s*=\s*["\']([^"\']+)["\']', attr_str, re.IGNORECASE)
-                val_m = re.search(r'value\s*=\s*["\']([^"\']*)["\']', attr_str, re.IGNORECASE)
-                if name_m: payload[name_m.group(1)] = val_m.group(1) if val_m else ""
-                    
-            for match in re.finditer(r'<button([^>]+)>', res1.text, re.IGNORECASE):
-                attr_str = match.group(1)
-                if 'submit' in attr_str.lower():
-                    name_m = re.search(r'name\s*=\s*["\']([^"\']+)["\']', attr_str, re.IGNORECASE)
-                    val_m = re.search(r'value\s*=\s*["\']([^"\']*)["\']', attr_str, re.IGNORECASE)
-                    if name_m: payload[name_m.group(1)] = val_m.group(1) if val_m else ""
-                    
-            payload['msisdn'] = number
-            if not any('submit' in k.lower() or 'btn' in k.lower() for k in payload.keys()):
-                payload['submit'] = 'submit'
+            api_headers['Referer'] = login_page_url
+            res2 = await loop.run_in_executor(None, lambda: session.post(
+                f"{api_base}/number", json={"msisdn": number, "ticket": ticket},
+                headers=api_headers, timeout=15))
+            d2 = _safe_json(res2)
+            print(f"[LOGIN] attempt={attempt+1} step=number status={res2.status_code} body={res2.text[:300]!r}", flush=True)
 
-            session.headers.update({'Origin': 'https://jazzdrive.com.pk', 'Referer': signup_url, 'Content-Type': 'application/x-www-form-urlencoded'})
-            res2 = await loop.run_in_executor(None, lambda: session.post(post_url, data=payload, timeout=15, allow_redirects=True))
-            verify_url = res2.url 
-            print(f"[LOGIN] attempt={attempt+1} step=submit_number status={res2.status_code} final_url={res2.url}", flush=True)
-            if "verify.php" in verify_url: break
-            print(f"[LOGIN] ❌ verify.php nahi aaya. Body snippet: {res2.text[:400]!r}", flush=True)
+            if res2.status_code == 200 and d2.get('ok') is True:
+                ticket = _find_key(d2.get('data', d2), {'ticket'}) or ticket
+                number_ok = True
+                break
+            last_error = res2.text[:150]
         except Exception as e:
+            last_error = str(e)
             print(f"[LOGIN] ❌ attempt={attempt+1} exception: {e}\n{traceback.format_exc()}", flush=True)
             if attempt == max_retries - 1:
                 return await msg.edit(f"❌ **Network Error:**\n`{e}`")
 
-    if "verify.php" not in verify_url:
-        return await msg.edit("❌ **Failed!** Server rejected number. Try again later.")
+    if not number_ok:
+        safe_err = last_error.replace('`', "'")
+        return await msg.edit(f"❌ **Failed!** Server rejected number. Try again later.\n`{safe_err}`")
 
     await msg.edit("🔑 **OTP Sent!**\n\nEnter the **4-digit OTP** sent to your number.\n*(Type **retry** to cancel)*")
     user_states[user_id] = "WAITING_FOR_OTP"
@@ -628,36 +680,51 @@ async def do_api_login(client, message, number, user_id):
 
     await msg.edit("⚙️ *Verifying OTP...*")
     try:
-        post_url_otp = verify_url
-        form_action_match = re.search(r'<form[^>]+action\s*=\s*["\']([^"\']+)["\']', res2.text, re.IGNORECASE)
-        if form_action_match:
-            post_url_otp = urljoin(verify_url, form_action_match.group(1).replace('&amp;', '&'))
+        # verify request ka exact payload screenshot me nahi tha, isliye pehle {otp, ticket};
+        # sirf validation error (400/422) pe agla variant try hota hai
+        variants = [
+            {"otp": otp, "ticket": ticket},
+            {"otp": otp, "msisdn": number, "ticket": ticket},
+            {"code": otp, "ticket": ticket},
+        ]
+        res_v = None
+        d_v = {}
+        for body in variants:
+            res_v = await loop.run_in_executor(None, lambda b=body: session.post(
+                f"{api_base}/verify", json=b, headers=api_headers, timeout=15))
+            d_v = _safe_json(res_v)
+            print(f"[LOGIN] step=verify keys={list(body.keys())} status={res_v.status_code} body={res_v.text[:400]!r}", flush=True)
+            if res_v.status_code not in (400, 422):
+                break
 
-        otp_payload = {}
-        for match in re.finditer(r'<input([^>]+)>', res2.text, re.IGNORECASE):
-            attr_str = match.group(1)
-            name_m = re.search(r'name\s*=\s*["\']([^"\']+)["\']', attr_str, re.IGNORECASE)
-            val_m = re.search(r'value\s*=\s*["\']([^"\']*)["\']', attr_str, re.IGNORECASE)
-            if name_m: otp_payload[name_m.group(1)] = val_m.group(1) if val_m else ""
-                
-        for match in re.finditer(r'<button([^>]+)>', res2.text, re.IGNORECASE):
-            attr_str = match.group(1)
-            if 'submit' in attr_str.lower():
-                name_m = re.search(r'name\s*=\s*["\']([^"\']+)["\']', attr_str, re.IGNORECASE)
-                val_m = re.search(r'value\s*=\s*["\']([^"\']*)["\']', attr_str, re.IGNORECASE)
-                if name_m: otp_payload[name_m.group(1)] = val_m.group(1) if val_m else ""
-                
-        otp_payload['otp'] = otp
-        if not any('submit' in k.lower() or 'btn' in k.lower() for k in otp_payload.keys()):
-            otp_payload['submit'] = 'submit'
-        
-        session.headers.update({'Referer': verify_url})
-        res3 = await loop.run_in_executor(None, lambda: session.post(post_url_otp, data=otp_payload, timeout=15, allow_redirects=True))
-        
-        parsed_url = urlparse(res3.url)
-        query_params = parse_qs(parsed_url.query)
-        
+        if res_v.status_code != 200 or d_v.get('ok') is not True:
+            safe_err = res_v.text[:150].replace('`', "'")
+            return await msg.edit(f"❌ **Error:** Server rejected OTP.\n`{res_v.status_code}: {safe_err}`")
+
+        verification_id = _find_key(d_v.get('data', d_v), {'verificationid'})
+        if not verification_id:
+            m_vid = re.search(r'verification_id["\']?\s*[:=]\s*["\']?([0-9a-fA-F]{20,})', res_v.text)
+            verification_id = m_vid.group(1) if m_vid else None
+        if not verification_id:
+            safe_err = res_v.text[:150].replace('`', "'")
+            print("[LOGIN] ❌ verification_id verify response me nahi mila", flush=True)
+            return await msg.edit(f"❌ **Error:** verification_id nahi mila.\n`{safe_err}`")
+
+        res3 = await loop.run_in_executor(None, lambda: session.get(
+            f"{auth_url}&verification_id={verification_id}",
+            headers={'Referer': login_page_url}, timeout=15, allow_redirects=True))
+        print(f"[LOGIN] step=authorize status={res3.status_code} final_url={res3.url[:200]}", flush=True)
+
+        query_params = parse_qs(urlparse(res3.url).query)
         if 'code' not in query_params:
+            for h in res3.history:
+                q = parse_qs(urlparse(h.headers.get('Location', '') or '').query)
+                if 'code' in q:
+                    query_params = q
+                    break
+
+        if 'code' not in query_params:
+            print(f"[LOGIN] ❌ authorization code nahi mila. Body snippet: {res3.text[:300]!r}", flush=True)
             return await msg.edit("❌ **Error:** Server rejected OTP.")
             
         auth_code = query_params['code'][0]

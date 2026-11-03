@@ -10,6 +10,7 @@ import urllib.parse
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urljoin
 import threading
+import traceback
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -565,8 +566,11 @@ async def do_api_login(client, message, number, user_id):
             auth_url = f"https://jazzdrive.com.pk/oauth2/authorization.php?response_type=code&client_id=web&state={random_state}&redirect_uri=https://cloud.jazzdrive.com.pk/ui/html/oauth.html"
             res1 = await loop.run_in_executor(None, lambda: session.get(auth_url, timeout=15, allow_redirects=True))
             signup_url = res1.url 
+            print(f"[LOGIN] attempt={attempt+1} step=auth status={res1.status_code} final_url={res1.url}", flush=True)
             
-            if "signup.php" not in signup_url: continue
+            if "signup.php" not in signup_url:
+                print(f"[LOGIN] ❌ signup.php page nahi mila. Body snippet: {res1.text[:300]!r}", flush=True)
+                continue
             
             if attempt == 0:
                 await msg.edit("📲 *Submitting your number...*")
@@ -597,8 +601,11 @@ async def do_api_login(client, message, number, user_id):
             session.headers.update({'Origin': 'https://jazzdrive.com.pk', 'Referer': signup_url, 'Content-Type': 'application/x-www-form-urlencoded'})
             res2 = await loop.run_in_executor(None, lambda: session.post(post_url, data=payload, timeout=15, allow_redirects=True))
             verify_url = res2.url 
+            print(f"[LOGIN] attempt={attempt+1} step=submit_number status={res2.status_code} final_url={res2.url}", flush=True)
             if "verify.php" in verify_url: break
+            print(f"[LOGIN] ❌ verify.php nahi aaya. Body snippet: {res2.text[:400]!r}", flush=True)
         except Exception as e:
+            print(f"[LOGIN] ❌ attempt={attempt+1} exception: {e}\n{traceback.format_exc()}", flush=True)
             if attempt == max_retries - 1:
                 return await msg.edit(f"❌ **Network Error:**\n`{e}`")
 
